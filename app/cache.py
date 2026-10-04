@@ -1,5 +1,6 @@
 ﻿import re, secrets, string
 from datetime import datetime, timedelta
+from app.files import TEMPLATES
 
 USER = "svc_ops"
 HOME = "/home/svc_ops"
@@ -73,5 +74,13 @@ class Session:
     def __init__(self):
         self.cwd = HOME
         self.fs = _seed()      # dir path -> {name: (perm, owner, size, mtime)}
-        self.files = {}        # abs path -> generated file content (the consistency cache)
+        self.files = {}        # abs path -> file content (the consistency cache)
         self.outputs = {}      # (cwd, command) -> generated output
+        for path, make in TEMPLATES.items():
+            content = make()
+            self.files[path] = content
+            parent, name = path.rsplit("/", 1)
+            parent = parent or "/"
+            entry = self.fs.get(parent, {}).get(name)
+            if entry:  # make the ls size match the real content
+                self.fs[parent][name] = (entry[0], entry[1], len(content.encode()), entry[3])

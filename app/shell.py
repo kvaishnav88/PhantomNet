@@ -6,7 +6,14 @@ from app.lore import LORE, build_system_prompt, build_command_prompt
 ROOT_ENTRY = ("drwxr-xr-x", "root", 4096, stamp(150, 6, 12))
 DENIED = {"/etc/shadow", "/etc/sudoers", "/root/.bash_history"}
 UNAME_A = "Linux hfs-app-02 5.15.0-117-generic #127-Ubuntu SMP Fri Jul 5 20:13:28 UTC 2024 x86_64 x86_64 x86_64 GNU/Linux\n"
-
+LLM_COMMANDS = {
+    "ps", "netstat", "ss", "ifconfig", "ip", "env", "printenv", "history",
+    "df", "du", "free", "uptime", "w", "who", "last", "lsof", "top",
+    "head", "tail", "less", "more", "grep", "find", "file", "stat", "wc",
+    "date", "echo", "crontab", "systemctl", "docker", "psql", "mysql",
+    "curl", "wget", "ping", "ssh", "sudo", "nmap", "python", "python3",
+    "sort", "uniq", "awk", "sed", "cut", "strings", "base64", "tar", "unzip",
+}
 
 def make_system() -> str:
     now = datetime.now()
@@ -183,6 +190,8 @@ def run_command(session, command, provider, system):
         yield from _ls(session, paths, flags, provider, system, command)
     elif cmd == "cat" and paths:
         for p in paths:
-            yield from _cat(session, p, provider, system)
-    else:
+             yield from _cat(session, p, provider, system)
+    elif cmd in LLM_COMMANDS:
         yield from _llm_cached(session, command, provider, system)
+    else:
+        yield f"bash: {cmd}: command not found\n"
