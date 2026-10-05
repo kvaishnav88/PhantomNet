@@ -1,4 +1,5 @@
-import posixpath, shlex
+import posixpath, re, shlex
+from app.sqlmock import Psql, DB as PG_DB, HOST as PG_HOST, USER as PG_USER
 from datetime import datetime
 from app.cache import USER, HOME, stamp, scrub_secrets, FENCE_LINE
 from app.lore import LORE, build_system_prompt, build_command_prompt
@@ -159,15 +160,77 @@ def _cat(session, p, provider, system):
     session.files[path] = "".join(out)
 
 
+def _psql_cmd(session, args, provider):
+    flags = {"-h": "host", "--host": "host", "-U": "user", "--username": "user",
+             "-d": "db", "--dbname": "db", "-c": "cmd", "--command": "cmd", "-p": "port"}
+    opts, i = {}, 0
+    while i < len(args):
+        a = args[i]
+        if a in flags and i + 1 < len(args):
+            opts[flags[a]] = args[i + 1]
+            i += 2
+        elif a == "-l":
+            opts["list"] = True
+            i += 1
+        else:
+            if not a.startswith("-") and "db" not in opts:
+                opts["db"] = a
+            i += 1
+    host = opts.get("host")
+    user = opts.get("user", PG_USER)
+    db = opts.get("db", user)
+    if not host:
+        yield ('psql: error: connection to server on socket "/var/run/postgresql/.s.PGSQL.5432" '
+               "failed: No such file or directory\n\tIs the server running locally and accepting "
+               "connections on that socket?\n")
+        return
+    if host in ("localhost", "127.0.0.1"):
+        yield (f'psql: error: connection to server at "{host}" (127.0.0.1), port 5432 failed: '
+               "Connection refused\n\tIs the server running on that host and accepting TCP/IP "
+               "connections?\n")
+        return
+    if host not in (PG_HOST, PG_HOST + ".halcyon-freight.internal"):
+        yield f'psql: error: could not translate host name "{host}" to address: Name or service not known\n'
+        return
+    target = f'connection to server at "{host}" (10.20.4.31), port 5432'
+    if user != PG_USER:
+        yield f'psql: error: {target} failed: FATAL:  password authentication failed for user "{user}"\n'
+        return
+    if db != PG_DB:
+        yield f'psql: error: {target} failed: FATAL:  database "{db}" does not exist\n'
+        return
+    ps = Psql(provider)
+    if opts.get("list"):
+        yield ps.meta("\\l")
+        return
+    if "cmd" in opts:
+        q = opts["cmd"].strip()
+        text, _ = ps.run(q if q.endswith(";") or q.startswith("\\") else q + ";")
+        yield text
+        return
+    session.psql = ps
+    yield ("psql (14.12 (Ubuntu 14.12-0ubuntu0.22.04.1))\n"
+           "SSL connection (protocol: TLSv1.3, cipher: TLS_AES_256_GCM_SHA384, bits: 256, compression: off)\n"
+           'Type "help" for help.\n\n')
+    
 def run_command(session, command, provider, system):
     command = command.strip()[:200]
     if not command:
+        return
+    if session.psql:
+        text, quit_ = session.psql.run(command)
+        if quit_:
+            session.psql = None
+        if text:
+            yield text
         return
     try:
         argv = shlex.split(command)
     except ValueError:
         yield "bash: unexpected EOF while looking for matching quote\n"
         return
+    while len(argv) > 1 and re.match(r"^[A-Za-z_]+=", argv[0]):
+        argv = argv[1:]
     cmd, args = argv[0], argv[1:]
     flags = "".join(a[1:] for a in args if a.startswith("-") and len(a) > 1)
     paths = [a for a in args if not a.startswith("-")]
@@ -190,7 +253,9 @@ def run_command(session, command, provider, system):
         yield from _ls(session, paths, flags, provider, system, command)
     elif cmd == "cat" and paths:
         for p in paths:
-             yield from _cat(session, p, provider, system)
+            yield from _cat(session, p, provider, system)
+    elif cmd == "psql":
+        yield from _psql_cmd(session, args, provider)
     elif cmd in LLM_COMMANDS:
         yield from _llm_cached(session, command, provider, system)
     else:

@@ -76,6 +76,7 @@ class Session:
         self.fs = _seed()      # dir path -> {name: (perm, owner, size, mtime)}
         self.files = {}        # abs path -> file content (the consistency cache)
         self.outputs = {}      # (cwd, command) -> generated output
+        self.psql = None       # active psql session, if any
         for path, make in TEMPLATES.items():
             content = make()
             self.files[path] = content

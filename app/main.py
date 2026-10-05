@@ -1,13 +1,16 @@
-import asyncio, logging, os, secrets, time
+import asyncio, logging, os, re, secrets, time
 from datetime import datetime, timedelta
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 
+from app import store
 from app.llm import get_provider
 from app.cache import Session, USER, HOME
 from app.shell import run_command, make_system
 from app.lore import LORE
-from app.events import Hub, mask_ip
+from app.events import Hub
 from app.analyst import analyze
+from app.sqlmock import DB as PG_DB
 from app.limits import (Limiter, DailyBudget, BudgetedProvider, BudgetExceeded,
                         DAILY_LLM_BUDGET, MAX_SESSION_SECONDS, IDLE_SECONDS)
 
@@ -15,6 +18,12 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger("phantomnet")
 
 app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(","),
+    allow_methods=["GET"],
+    allow_headers=["*"],
+)
 limiter = Limiter()
 budget = DailyBudget(DAILY_LLM_BUDGET)
 raw_provider = get_provider()
@@ -31,6 +40,16 @@ def health():
     return {"status": "ok", "llm_calls_today": budget.used, **hub.stats}
 
 
+@app.get("/api/sessions/{sid}")
+def get_session(sid: str):
+    if not re.fullmatch(r"[0-9a-f]{6,12}", sid):
+        raise HTTPException(404)
+    events = store.session(sid)
+    if not events:
+        raise HTTPException(404)
+    return {"sid": sid, "events": events}
+
+
 def client_ip(ws: WebSocket) -> str:
     fwd = ws.headers.get("x-forwarded-for")
     if fwd:
@@ -39,6 +58,8 @@ def client_ip(ws: WebSocket) -> str:
 
 
 def prompt(session) -> str:
+    if session.psql:
+        return f"{PG_DB}{'->' if session.psql.buf else '=>'} "
     cwd = "~" + session.cwd[len(HOME):] if session.cwd.startswith(HOME) else session.cwd
     return f"{USER}@{LORE['hostname']}:{cwd}$ "
 
@@ -124,7 +145,7 @@ async def shell(ws: WebSocket):
         return
 
     session, system = Session(), make_system()
-    sid = secrets.token_hex(3)
+    sid = secrets.token_hex(5)
     cmds = []
     deadline = time.monotonic() + MAX_SESSION_SECONDS
     log.info("connect sid=%s ip=%s", sid, ip)
@@ -145,7 +166,7 @@ async def shell(ws: WebSocket):
                 break
 
             line = line.strip()[:200]
-            if line in ("exit", "logout"):
+            if line in ("exit", "logout") and not session.psql:
                 await ws.send_text("logout\n")
                 break
             if not line:
@@ -156,6 +177,7 @@ async def shell(ws: WebSocket):
                 continue
 
             before = budget.used
+            psql_related = session.psql is not None or line.split()[0] == "psql"
             start, first, out = time.perf_counter(), None, []
             try:
                 async for chunk in iterate(run_command(session, line, provider, system)):
@@ -175,7 +197,7 @@ async def shell(ws: WebSocket):
 
             used_llm = budget.used > before
             hub.command(sid, line, "".join(out), used_llm,
-                        first if used_llm else None)
+                        first if used_llm and not psql_related else None)
             cmds.append(line)
             if len(cmds) % 5 == 0:
                 schedule_analysis(sid, cmds)

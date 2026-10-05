@@ -1,6 +1,8 @@
 import asyncio, time
 from collections import deque
 
+from app import store
+
 MAX_MONITORS = 20
 
 
@@ -20,6 +22,7 @@ class Hub:
         self.stats = {"sessions": 0, "active": 0, "commands": 0,
                       "llm_commands": 0, "avg_ttft_ms": 0}
         self._ttft_sum = 0.0
+        self._ttft_n = 0
 
     def subscribe(self):
         if len(self.subs) >= MAX_MONITORS:
@@ -34,6 +37,7 @@ class Hub:
     def publish(self, event, keep=True):
         event["ts"] = time.time()
         if keep:
+            store.save(event)
             self.log.append(event)
         for q in list(self.subs):
             try:
@@ -60,9 +64,10 @@ class Hub:
         s["commands"] += 1
         if used_llm:
             s["llm_commands"] += 1
-            if ttft_ms is not None:
-                self._ttft_sum += ttft_ms
-                s["avg_ttft_ms"] = round(self._ttft_sum / s["llm_commands"])
+        if used_llm and ttft_ms is not None:
+            self._ttft_sum += ttft_ms
+            self._ttft_n += 1
+            s["avg_ttft_ms"] = round(self._ttft_sum / self._ttft_n)
         self.publish({
             "type": "command", "sid": sid, "cmd": cmd[:200],
             "output": output[:600], "truncated": len(output) > 600,
