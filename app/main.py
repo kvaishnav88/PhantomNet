@@ -1,4 +1,4 @@
-import asyncio, logging, time
+import asyncio, logging, os, secrets, time
 from datetime import datetime, timedelta
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
@@ -6,6 +6,8 @@ from app.llm import get_provider
 from app.cache import Session, USER, HOME
 from app.shell import run_command, make_system
 from app.lore import LORE
+from app.events import Hub, mask_ip
+from app.analyst import analyze
 from app.limits import (Limiter, DailyBudget, BudgetedProvider, BudgetExceeded,
                         DAILY_LLM_BUDGET, MAX_SESSION_SECONDS, IDLE_SECONDS)
 
@@ -15,14 +17,18 @@ log = logging.getLogger("phantomnet")
 app = FastAPI()
 limiter = Limiter()
 budget = DailyBudget(DAILY_LLM_BUDGET)
-provider = BudgetedProvider(get_provider(), budget)
+raw_provider = get_provider()
+provider = BudgetedProvider(raw_provider, budget)
+hub = Hub()
+bg_tasks = set()
+DASHBOARD_TOKEN = os.getenv("DASHBOARD_TOKEN", "")
 
 BUSY = "bash: fork: retry: Resource temporarily unavailable\n"
 
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "llm_calls_today": budget.used}
+    return {"status": "ok", "llm_calls_today": budget.used, **hub.stats}
 
 
 def client_ip(ws: WebSocket) -> str:
@@ -54,6 +60,59 @@ async def iterate(gen):
         yield chunk
 
 
+async def run_analysis(sid, cmds):
+    result = await analyze(cmds, raw_provider, budget)
+    hub.publish({"type": "analysis", "sid": sid, "n": len(cmds), **result})
+
+
+def schedule_analysis(sid, cmds):
+    task = asyncio.create_task(run_analysis(sid, list(cmds)))
+    bg_tasks.add(task)
+    task.add_done_callback(bg_tasks.discard)
+
+
+@app.websocket("/monitor")
+async def monitor(ws: WebSocket):
+    await ws.accept()
+    if DASHBOARD_TOKEN and ws.query_params.get("token") != DASHBOARD_TOKEN:
+        await ws.close(code=1008)
+        return
+    q = hub.subscribe()
+    if q is None:
+        await ws.close(code=1013)
+        return
+    recv = asyncio.create_task(ws.receive_text())
+    recv.add_done_callback(lambda t: t.cancelled() or t.exception())
+    get = None
+    try:
+        for ev in list(hub.log):
+            await ws.send_json(ev)
+        await ws.send_json(hub.stats_event())
+        while True:
+            if get is None:
+                get = asyncio.create_task(q.get())
+            done, _ = await asyncio.wait({recv, get}, timeout=25,
+                                         return_when=asyncio.FIRST_COMPLETED)
+            if recv in done:
+                break
+            if get in done:
+                await ws.send_json(get.result())
+                get = None
+            else:
+                await ws.send_json({"type": "ping"})
+    except Exception:
+        pass
+    finally:
+        hub.unsubscribe(q)
+        recv.cancel()
+        if get is not None:
+            get.cancel()
+        try:
+            await ws.close()
+        except Exception:
+            pass
+
+
 @app.websocket("/ws")
 async def shell(ws: WebSocket):
     ip = client_ip(ws)
@@ -65,8 +124,11 @@ async def shell(ws: WebSocket):
         return
 
     session, system = Session(), make_system()
+    sid = secrets.token_hex(3)
+    cmds = []
     deadline = time.monotonic() + MAX_SESSION_SECONDS
-    log.info("connect ip=%s", ip)
+    log.info("connect sid=%s ip=%s", sid, ip)
+    hub.session_started(sid, ip)
     try:
         await ws.send_text(banner())
         while True:
@@ -88,25 +150,43 @@ async def shell(ws: WebSocket):
                 break
             if not line:
                 continue
-            log.info("cmd ip=%s %r", ip, line)
+            log.info("cmd sid=%s ip=%s %r", sid, ip, line)
             if not limiter.allow_command(ip):
                 await ws.send_text(BUSY)
                 continue
+
+            before = budget.used
+            start, first, out = time.perf_counter(), None, []
             try:
                 async for chunk in iterate(run_command(session, line, provider, system)):
+                    if first is None:
+                        first = (time.perf_counter() - start) * 1000
+                    out.append(chunk)
                     await ws.send_text(chunk)
             except BudgetExceeded:
+                out.append(BUSY)
                 await ws.send_text(BUSY)
             except WebSocketDisconnect:
                 raise
             except Exception:
                 log.exception("command failed")
+                out.append(BUSY)
                 await ws.send_text(BUSY)
+
+            used_llm = budget.used > before
+            hub.command(sid, line, "".join(out), used_llm,
+                        first if used_llm else None)
+            cmds.append(line)
+            if len(cmds) % 5 == 0:
+                schedule_analysis(sid, cmds)
     except WebSocketDisconnect:
         pass
     finally:
         limiter.close(ip)
-        log.info("disconnect ip=%s", ip)
+        if len(cmds) >= 2 and len(cmds) % 5 != 0:
+            schedule_analysis(sid, cmds)
+        hub.session_ended(sid)
+        log.info("disconnect sid=%s ip=%s", sid, ip)
         try:
             await ws.close()
         except Exception:
