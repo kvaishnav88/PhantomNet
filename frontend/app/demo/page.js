@@ -63,7 +63,7 @@ function Terminal() {
   const [line, setLine] = useState("");
   const [busy, setBusy] = useState(false);
   const ws = useRef(null), box = useRef(null), hist = useRef([]), pos = useRef(0), stopRun = useRef(false);
-
+  const [slow, setSlow] = useState(false);
   const connect = useCallback(() => {
     stopRun.current = false;
     setOut(""); setError(""); setStatus("connecting");
@@ -80,6 +80,11 @@ function Terminal() {
     connect();
     return () => { stopRun.current = true; const s = ws.current; ws.current = null; if (s) s.close(); };
   }, [connect]);
+  useEffect(() => {
+    if (status !== "connecting") { setSlow(false); return; }
+    const t = setTimeout(() => setSlow(true), 4000);
+    return () => clearTimeout(t);
+  }, [status]);
   useEffect(() => { if (box.current) box.current.scrollTop = box.current.scrollHeight; }, [out]);
 
   const send = (cmd) => {
@@ -123,6 +128,7 @@ function Terminal() {
           : <button type="button" onClick={connect} disabled={status === "connecting"}>Reconnect</button>}
       </form>
       {error && <div className="err">{error}</div>}
+      {slow && <div className="err" style={{ color: "var(--amber)" }}>Waking the server up. Free hosting can take up to a minute on the first visit.</div>}
       <div className="muted small" style={{ marginTop: 12 }}>One-click attack scenarios</div>
       <div className="scen">
         {SCENARIOS.map((s) => (

@@ -51,11 +51,14 @@ def get_session(sid: str):
 
 
 def client_ip(ws: WebSocket) -> str:
-    fwd = ws.headers.get("x-forwarded-for")
+    h = ws.headers
+    for name in ("true-client-ip", "cf-connecting-ip"):
+        if h.get(name):
+            return h[name].strip()
+    fwd = h.get("x-forwarded-for")
     if fwd:
-        return fwd.split(",")[-1].strip()
+        return fwd.split(",")[0].strip()
     return ws.client.host if ws.client else "unknown"
-
 
 def prompt(session) -> str:
     if session.psql:
@@ -137,6 +140,9 @@ async def monitor(ws: WebSocket):
 @app.websocket("/ws")
 async def shell(ws: WebSocket):
     ip = client_ip(ws)
+    log.info("HDRS tci=%s cfip=%s xff=%s sock=%s", ws.headers.get("true-client-ip"),
+        ws.headers.get("cf-connecting-ip"), ws.headers.get("x-forwarded-for"),
+        ws.client.host if ws.client else None)
     await ws.accept()
     refusal = limiter.open(ip)
     if refusal:
