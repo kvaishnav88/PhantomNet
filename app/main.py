@@ -34,7 +34,9 @@ DASHBOARD_TOKEN = os.getenv("DASHBOARD_TOKEN", "")
 
 BUSY = "bash: fork: retry: Resource temporarily unavailable\n"
 
-
+@app.get("/")
+def root():
+    return {"service": "PhantomNet honeypot backend", "health": "/health"}
 @app.get("/health")
 def health():
     return {"status": "ok", "llm_calls_today": budget.used, **hub.stats}
