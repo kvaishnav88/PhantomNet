@@ -3,6 +3,7 @@ from app.sqlmock import Psql, DB as PG_DB, HOST as PG_HOST, USER as PG_USER
 from datetime import datetime
 from app.cache import USER, HOME, stamp, scrub_secrets, FENCE_LINE
 from app.lore import LORE, build_system_prompt, build_command_prompt
+from app.procs import ps_output, uptime_output
 
 ROOT_ENTRY = ("drwxr-xr-x", "root", 4096, stamp(150, 6, 12))
 DENIED = {"/etc/shadow", "/etc/sudoers", "/root/.bash_history"}
@@ -256,6 +257,14 @@ def run_command(session, command, provider, system):
             yield from _cat(session, p, provider, system)
     elif cmd == "psql":
         yield from _psql_cmd(session, args, provider)
+    elif cmd == "uptime" and not args:
+        yield uptime_output(session)
+    elif cmd == "ps":
+        text = ps_output(session, command)
+        if text is None:
+            yield from _llm_cached(session, command, provider, system)
+        else:
+            yield text
     elif cmd in LLM_COMMANDS:
         yield from _llm_cached(session, command, provider, system)
     else:

@@ -70,7 +70,7 @@ class Hub:
             s["avg_ttft_ms"] = round(self._ttft_sum / self._ttft_n)
         self.publish({
             "type": "command", "sid": sid, "cmd": cmd[:200],
-            "output": output[:600], "truncated": len(output) > 600,
+            "output": output[:4000], "truncated": len(output) > 4000,
             "llm": used_llm,
             "ttft_ms": round(ttft_ms) if ttft_ms is not None else None,
         })
